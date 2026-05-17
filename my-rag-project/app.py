@@ -6,11 +6,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_ollama import OllamaLLM
-from langchain.chains import RetrievalQA
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 CHROMA_DIR = "./chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 OLLAMA_MODEL = "llama3.2"
+
+PROMPT = PromptTemplate.from_template(
+    "Use the following context to answer the question.\n\n"
+    "Context: {context}\n\n"
+    "Question: {question}\n\n"
+    "Answer:"
+)
 
 
 @st.cache_resource(show_spinner="Loading embedding model...")
@@ -27,10 +36,20 @@ def build_vectorstore(pdf_path: str, embeddings):
     return vectorstore, len(chunks)
 
 
-def get_qa_chain(vectorstore):
-    llm = OllamaLLM(model=OLLAMA_MODEL)
+def get_chain(vectorstore):
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-    return RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+    llm = OllamaLLM(model=OLLAMA_MODEL)
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | PROMPT
+        | llm
+        | StrOutputParser()
+    )
+    return chain, retriever
 
 
 st.set_page_config(page_title="PDF RAG Chatbot", page_icon="📄")
@@ -82,10 +101,9 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                chain = get_qa_chain(st.session_state.vectorstore)
-                result = chain.invoke({"query": prompt})
-                answer = result["result"]
-                sources = result["source_documents"]
+                chain, retriever = get_chain(st.session_state.vectorstore)
+                answer = chain.invoke(prompt)
+                sources = retriever.invoke(prompt)
 
             st.markdown(answer)
 
