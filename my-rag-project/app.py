@@ -1,5 +1,4 @@
 import streamlit as st
-from pathlib import Path
 import tempfile
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -38,38 +37,45 @@ st.set_page_config(page_title="PDF RAG Chatbot", page_icon="📄")
 st.title("📄 PDF RAG Chatbot")
 st.caption(f"Powered by Ollama ({OLLAMA_MODEL}) + ChromaDB + sentence-transformers")
 
-with st.sidebar:
-    st.header("Upload PDF")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ── Step 1: Upload ────────────────────────────────────────────────────────────
+if "vectorstore" not in st.session_state:
+    st.markdown("### Step 1: Upload your PDF")
+    uploaded_file = st.file_uploader("", type="pdf", label_visibility="collapsed")
 
     if uploaded_file:
-        if st.button("Index PDF", type="primary"):
+        st.markdown("### Step 2: Click the button below to index it")
+        if st.button("Index PDF", type="primary", use_container_width=True):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(uploaded_file.read())
                 tmp_path = tmp.name
 
-            with st.spinner("Indexing PDF..."):
+            with st.spinner("Indexing PDF — this may take a minute..."):
                 embeddings = get_embeddings()
                 vectorstore, n_chunks = build_vectorstore(tmp_path, embeddings)
                 st.session_state.vectorstore = vectorstore
-                st.session_state.messages = []
 
-            st.success(f"Indexed {n_chunks} chunks from '{uploaded_file.name}'")
+            st.success(f"Done! Indexed {n_chunks} chunks from '{uploaded_file.name}'. You can now ask questions.")
+            st.rerun()
 
-    if "vectorstore" in st.session_state:
-        st.info("PDF indexed. Ask questions below.")
+# ── Step 2: Chat ──────────────────────────────────────────────────────────────
+else:
+    st.success("PDF is indexed and ready. Ask your questions below.")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    if st.button("Upload a different PDF"):
+        del st.session_state.vectorstore
+        st.session_state.messages = []
+        st.rerun()
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    st.divider()
 
-if prompt := st.chat_input("Ask a question about your PDF..."):
-    if "vectorstore" not in st.session_state:
-        st.warning("Please upload and index a PDF first.")
-    else:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask a question about your PDF..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -83,7 +89,7 @@ if prompt := st.chat_input("Ask a question about your PDF..."):
 
             st.markdown(answer)
 
-            with st.expander("Sources"):
+            with st.expander("View sources"):
                 for doc in sources:
                     page = doc.metadata.get("page", "?")
                     st.markdown(f"**Page {page + 1}:** {doc.page_content[:300]}...")
