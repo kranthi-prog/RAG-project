@@ -8,15 +8,17 @@ from langchain_community.vectorstores import Chroma
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 CHROMA_DIR = "./chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 OLLAMA_MODEL = "llama3.2"
+MEMORY_WINDOW = 6  # number of recent messages to keep as context (3 exchanges)
 
 PROMPT = PromptTemplate.from_template(
-    "Use the following context to answer the question.\n\n"
-    "Context: {context}\n\n"
+    "Use only the context below to answer the question. "
+    "If the answer is not in the context, say 'I don't know'.\n\n"
+    "Context:\n{context}\n\n"
+    "Conversation History:\n{chat_history}\n\n"
     "Question: {question}\n\n"
     "Answer:"
 )
@@ -30,31 +32,43 @@ def get_embeddings():
 def build_vectorstore(pdf_path: str, embeddings):
     loader = PyPDFLoader(pdf_path)
     docs = loader.load()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=75)
     chunks = splitter.split_documents(docs)
     vectorstore = Chroma.from_documents(chunks, embeddings, persist_directory=CHROMA_DIR)
     return vectorstore, len(chunks)
 
 
-def get_chain(vectorstore):
+def format_history(messages: list) -> str:
+    if not messages:
+        return "No previous conversation."
+    recent = messages[-MEMORY_WINDOW:]
+    lines = []
+    for msg in recent:
+        role = "Human" if msg["role"] == "user" else "Assistant"
+        lines.append(f"{role}: {msg['content']}")
+    return "\n".join(lines)
+
+
+def get_answer(vectorstore, question: str, chat_history: str):
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-    llm = OllamaLLM(model=OLLAMA_MODEL)
+    llm = OllamaLLM(model=OLLAMA_MODEL, temperature=0)
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    docs = retriever.invoke(question)
+    context = "\n\n".join(doc.page_content for doc in docs)
 
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | PROMPT
-        | llm
-        | StrOutputParser()
-    )
-    return chain, retriever
+    chain = PROMPT | llm | StrOutputParser()
+    answer = chain.invoke({
+        "context": context,
+        "chat_history": chat_history,
+        "question": question,
+    })
+    return answer, docs
 
 
+# ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="PDF RAG Chatbot", page_icon="📄")
 st.title("📄 PDF RAG Chatbot")
-st.caption(f"Powered by Ollama ({OLLAMA_MODEL}) + ChromaDB + sentence-transformers")
+st.caption(f"Powered by Ollama ({OLLAMA_MODEL}) + ChromaDB + sentence-transformers | Memory: last {MEMORY_WINDOW // 2} exchanges")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -81,7 +95,13 @@ if "vectorstore" not in st.session_state:
 
 # ── Step 2: Chat ──────────────────────────────────────────────────────────────
 else:
-    st.success("PDF is indexed and ready. Ask your questions below.")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.success("PDF is indexed and ready. Ask your questions below.")
+    with col2:
+        if st.button("Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
 
     if st.button("Upload a different PDF"):
         del st.session_state.vectorstore
@@ -101,9 +121,10 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                chain, retriever = get_chain(st.session_state.vectorstore)
-                answer = chain.invoke(prompt)
-                sources = retriever.invoke(prompt)
+                history = format_history(st.session_state.messages[:-1])
+                answer, sources = get_answer(
+                    st.session_state.vectorstore, prompt, history
+                )
 
             st.markdown(answer)
 
